@@ -21,10 +21,10 @@
 package tunny
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 //------------------------------------------------------------------------------
@@ -34,7 +34,6 @@ var (
 	ErrPoolNotRunning = errors.New("the pool is not running")
 	ErrJobNotFunc     = errors.New("generic worker not given a func()")
 	ErrWorkerClosed   = errors.New("worker was closed")
-	ErrJobTimedOut    = errors.New("job request timed out")
 )
 
 // Worker is an interface representing a Tunny working agent. It will be used to
@@ -147,39 +146,13 @@ func NewCallback(n int) *Pool {
 //------------------------------------------------------------------------------
 
 // Process will use the Pool to process a payload and synchronously return the
-// result. Process can be called safely by any goroutines, but will panic if the
-// Pool has been stopped.
-func (p *Pool) Process(payload interface{}) interface{} {
-	atomic.AddInt64(&p.queuedJobs, 1)
-
-	request, open := <-p.reqChan
-	if !open {
-		panic(ErrPoolNotRunning)
-	}
-
-	request.jobChan <- payload
-
-	payload, open = <-request.retChan
-	if !open {
-		panic(ErrWorkerClosed)
-	}
-
-	atomic.AddInt64(&p.queuedJobs, -1)
-	return payload
-}
-
-// ProcessTimed will use the Pool to process a payload and synchronously return
-// the result. If the timeout occurs before the job has finished the worker will
-// be interrupted and ErrJobTimedOut will be returned. ProcessTimed can be
-// called safely by any goroutines.
-func (p *Pool) ProcessTimed(
+// result. Process can be called safely by any goroutines.
+func (p *Pool) Process(
+	ctx context.Context,
 	payload interface{},
-	timeout time.Duration,
 ) (interface{}, error) {
 	atomic.AddInt64(&p.queuedJobs, 1)
 	defer atomic.AddInt64(&p.queuedJobs, -1)
-
-	tout := time.NewTimer(timeout)
 
 	var request workRequest
 	var open bool
@@ -189,15 +162,15 @@ func (p *Pool) ProcessTimed(
 		if !open {
 			return nil, ErrPoolNotRunning
 		}
-	case <-tout.C:
-		return nil, ErrJobTimedOut
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 
 	select {
 	case request.jobChan <- payload:
-	case <-tout.C:
+	case <-ctx.Done():
 		request.interruptFunc()
-		return nil, ErrJobTimedOut
+		return nil, ctx.Err()
 	}
 
 	select {
@@ -205,12 +178,11 @@ func (p *Pool) ProcessTimed(
 		if !open {
 			return nil, ErrWorkerClosed
 		}
-	case <-tout.C:
+	case <-ctx.Done():
 		request.interruptFunc()
-		return nil, ErrJobTimedOut
+		return nil, ctx.Err()
 	}
 
-	tout.Stop()
 	return payload, nil
 }
 

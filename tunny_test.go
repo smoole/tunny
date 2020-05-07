@@ -21,6 +21,7 @@
 package tunny
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -61,7 +62,11 @@ func TestPoolSizeAdjustment(t *testing.T) {
 	}
 
 	// Finally, make sure we still have actual active workers.
-	if exp, act := "foo", pool.Process(0).(string); exp != act {
+	ret, err := pool.Process(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("Failed to process: %v", err)
+	}
+	if exp, act := "foo", ret.(string); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 
@@ -80,8 +85,12 @@ func TestFuncJob(t *testing.T) {
 	})
 	defer pool.Close()
 
+	ctx := context.Background()
 	for i := 0; i < 10; i++ {
-		ret := pool.Process(10)
+		ret, err := pool.Process(ctx, 10)
+		if err != nil {
+			t.Fatalf("Failed to process: %v", err)
+		}
 		if exp, act := 20, ret.(int); exp != act {
 			t.Errorf("Wrong result: %v != %v", act, exp)
 		}
@@ -95,8 +104,10 @@ func TestFuncJobTimed(t *testing.T) {
 	})
 	defer pool.Close()
 
+	ctx := context.Background()
 	for i := 0; i < 10; i++ {
-		ret, err := pool.ProcessTimed(10, time.Millisecond)
+		tctx, _ := context.WithTimeout(ctx, time.Millisecond)
+		ret, err := pool.Process(tctx, 10)
 		if err != nil {
 			t.Fatalf("Failed to process: %v", err)
 		}
@@ -111,16 +122,23 @@ func TestCallbackJob(t *testing.T) {
 	defer pool.Close()
 
 	var counter int32
+	ctx := context.Background()
 	for i := 0; i < 10; i++ {
-		ret := pool.Process(func() {
+		ret, err := pool.Process(ctx, func() {
 			atomic.AddInt32(&counter, 1)
 		})
+		if err != nil {
+			t.Fatalf("Failed to process: %v", err)
+		}
 		if ret != nil {
 			t.Errorf("Non-nil callback response: %v", ret)
 		}
 	}
 
-	ret := pool.Process("foo")
+	ret, err := pool.Process(ctx, "foo")
+	if err != nil {
+		t.Fatalf("Failed to process: %v", err)
+	}
 	if exp, act := ErrJobNotFunc, ret; exp != act {
 		t.Errorf("Wrong result from non-func: %v != %v", act, exp)
 	}
@@ -138,8 +156,10 @@ func TestTimeout(t *testing.T) {
 	})
 	defer pool.Close()
 
-	_, act := pool.ProcessTimed(10, time.Duration(1))
-	if exp := ErrJobTimedOut; exp != act {
+	ctx := context.Background()
+	tctx, _ := context.WithTimeout(ctx, time.Duration(1))
+	_, act := pool.Process(tctx, 10)
+	if exp := context.DeadlineExceeded; exp != act {
 		t.Errorf("Wrong error returned: %v != %v", act, exp)
 	}
 }
@@ -150,25 +170,12 @@ func TestTimedJobsAfterClose(t *testing.T) {
 	})
 	pool.Close()
 
-	_, act := pool.ProcessTimed(10, time.Duration(1))
+	ctx := context.Background()
+	tctx, _ := context.WithTimeout(ctx, time.Duration(1))
+	_, act := pool.Process(tctx, 10)
 	if exp := ErrPoolNotRunning; exp != act {
 		t.Errorf("Wrong error returned: %v != %v", act, exp)
 	}
-}
-
-func TestJobsAfterClose(t *testing.T) {
-	pool := NewFunc(1, func(in interface{}) interface{} {
-		return 1
-	})
-	pool.Close()
-
-	defer func() {
-		if r := recover(); r == nil {
-			t.Errorf("Process after Stop() did not panic")
-		}
-	}()
-
-	pool.Process(10)
 }
 
 func TestParallelJobs(t *testing.T) {
@@ -192,7 +199,7 @@ func TestParallelJobs(t *testing.T) {
 
 		for i := 0; i < nWorkers; i++ {
 			go func() {
-				ret := pool.Process(10)
+				ret, _ := pool.Process(context.Background(), 10)
 				if exp, act := 20, ret.(int); exp != act {
 					t.Errorf("Wrong result: %v != %v", act, exp)
 				}
@@ -251,19 +258,23 @@ func TestCustomWorker(t *testing.T) {
 		t.Fatal("Worker started off terminated")
 	}
 
-	_, err := pool.ProcessTimed(10, time.Millisecond)
-	if exp, act := ErrJobTimedOut, err; exp != act {
+	ctx := context.Background()
+	tctx, _ := context.WithTimeout(ctx, time.Millisecond)
+	_, err := pool.Process(tctx, 10)
+	if exp, act := context.DeadlineExceeded, err; exp != act {
 		t.Errorf("Wrong error: %v != %v", act, exp)
 	}
 
 	close(worker1.blockReadyChan)
-	_, err = pool.ProcessTimed(10, time.Millisecond)
-	if exp, act := ErrJobTimedOut, err; exp != act {
+	tctx, _ = context.WithTimeout(ctx, time.Millisecond)
+	_, err = pool.Process(tctx, 10)
+	if exp, act := context.DeadlineExceeded, err; exp != act {
 		t.Errorf("Wrong error: %v != %v", act, exp)
 	}
 
 	close(worker1.blockProcChan)
-	if exp, act := 10, pool.Process(10).(int); exp != act {
+	ret, _ := pool.Process(ctx, 10)
+	if exp, act := 10, ret.(int); exp != act {
 		t.Errorf("Wrong result: %v != %v", act, exp)
 	}
 
@@ -285,7 +296,7 @@ func BenchmarkFuncJob(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		ret := pool.Process(10)
+		ret, _ := pool.Process(context.Background(), 10)
 		if exp, act := 20, ret.(int); exp != act {
 			b.Errorf("Wrong result: %v != %v", act, exp)
 		}
@@ -301,8 +312,10 @@ func BenchmarkFuncTimedJob(b *testing.B) {
 
 	b.ResetTimer()
 
+	ctx := context.Background()
 	for i := 0; i < b.N; i++ {
-		ret, err := pool.ProcessTimed(10, time.Second)
+		tctx, _ := context.WithTimeout(ctx, time.Second)
+		ret, err := pool.Process(tctx, 10)
 		if err != nil {
 			b.Error(err)
 		}
